@@ -10,6 +10,7 @@ import {
   predict,
   sampleCrashes,
   studyModel,
+  type ModelFit,
   type ModelId,
   type ReadyPrediction,
 } from "./predict/model";
@@ -27,6 +28,8 @@ export function App() {
   const [liveStatus, setLiveStatus] = useState<"point" | "login" | "idle">("idle");
   const [salt, setSalt] = useState(String(DEFAULT_SALT));
   const [model, setModel] = useState<ModelId>("similar");
+  const [fits, setFits] = useState<ModelFit[]>([]);
+  const studiedCount = useRef<number | null>(null);
   const [loadingDatabase, setLoadingDatabase] = useState(false);
   const [studying, setStudying] = useState(false);
   const storedRef = useRef<number[] | null>(null);
@@ -41,6 +44,13 @@ export function App() {
     [crashes, saltValue, model],
   );
   const lastPoint = crashes.length > 0 ? crashes[crashes.length - 1] : null;
+
+  useEffect(() => {
+    if (studiedCount.current != null && crashes.length !== studiedCount.current) {
+      studiedCount.current = null;
+      setFits([]);
+    }
+  }, [crashes.length]);
 
   function addPoint(event: FormEvent) {
     event.preventDefault();
@@ -194,12 +204,15 @@ export function App() {
         setFileNote("The database did not produce a prediction.");
         return;
       }
+      const chosen = study.fits.find((item) => item.id === study.model);
+      studiedCount.current = points.length;
+      setFits(study.fits);
       setUsingSample(false);
       setRaw(points.map((value) => value.toFixed(2)).join("\n"));
       setSalt(study.salt.toFixed(2));
       setModel(study.model);
       setFileNote(
-        `Studied ${study.count} database points. The closest model predicts ${study.predicted.toFixed(2)}x at salt ${study.salt.toFixed(2)}.`,
+        `Studied ${study.count} registered database points. ${chosen?.name ?? "The chosen model"} matched ${study.matches} of the last ${study.checked}. Next prediction is ${study.predicted.toFixed(2)}x.`,
       );
     } catch {
       setFileNote("Could not study the database. Keep this app server running.");
@@ -249,7 +262,12 @@ export function App() {
           {prediction.status === "need-data" ? (
             <NeedData message={prediction.message} count={crashes.length} lastPoint={lastPoint} />
           ) : (
-            <Decision prediction={prediction} lastPoint={lastPoint} onSelectModel={setModel} />
+            <Decision
+              prediction={prediction}
+              lastPoint={lastPoint}
+              fits={fits}
+              onSelectModel={setModel}
+            />
           )}
         </section>
 
@@ -339,7 +357,7 @@ export function App() {
       <footer>
         The text file is one crash point per line, oldest first and newest last. Lines that start
         with # are notes. New crash points are stored in the database, 200 at a time. Study reads
-        every saved point and chooses the model whose past guesses were closest. Pick another
+        every saved point and chooses the model that matched the most recent registered crashes. Pick another
         model to use that prediction instead. The next round can still land outside the range.
       </footer>
     </div>
@@ -357,10 +375,12 @@ function liveStatusText(status: "point" | "login" | "idle"): string {
 function Decision({
   prediction,
   lastPoint,
+  fits,
   onSelectModel,
 }: {
   prediction: ReadyPrediction;
   lastPoint: number | null;
+  fits: ModelFit[];
   onSelectModel: (model: ModelId) => void;
 }) {
   const early = prediction.readiness === "early";
@@ -423,7 +443,11 @@ function Decision({
           >
             <span>{item.name}</span>
             <strong>{formatMultiplier(item.predicted)}</strong>
-            <small>{item.detail}</small>
+            <small>
+              {fits.find((fit) => fit.id === item.id)?.checked
+                ? `${fits.find((fit) => fit.id === item.id)?.matches}/${fits.find((fit) => fit.id === item.id)?.checked} matched`
+                : item.detail}
+            </small>
           </button>
         ))}
       </div>
@@ -474,7 +498,10 @@ function Details({ crashes, prediction }: { crashes: number[]; prediction: Ready
       <article className="panel">
         <header>
           <h2>Recent crashes</h2>
-          <p>Last {shown.length} points. Height is capped at 12x so early busts stay visible.</p>
+          <p>
+            Last {shown.length} points. Bars and the line use the same values, capped at 12x so early busts stay
+            visible. The dots use the BC.Game colors.
+          </p>
         </header>
         <div className="chart" role="img" aria-label="Recent crash points">
           {shown.map((value, index) => (
@@ -486,6 +513,8 @@ function Details({ crashes, prediction }: { crashes: number[]; prediction: Ready
             </div>
           ))}
         </div>
+        <RecentCrashLine values={shown} />
+        <RecentCrashDots values={shown} />
       </article>
 
       <article className="panel">
@@ -521,6 +550,94 @@ function Mark() {
       <path d="M8 32c6-2 8-14 14-14s6 10 12 8 4-12 6-14" />
     </svg>
   );
+}
+
+export function RecentCrashLine({ values }: { values: number[] }) {
+  const cap = 12;
+  const width = 640;
+  const height = 168;
+  const padLeft = 46;
+  const padRight = 12;
+  const padTop = 16;
+  const padBottom = 12;
+  const plotWidth = width - padLeft - padRight;
+  const plotHeight = height - padTop - padBottom;
+  const scale = Math.max(...values.map((value) => Math.min(value, cap)), 2);
+  const points = values.map((value, index) => {
+    const x = padLeft + (values.length === 1 ? plotWidth / 2 : (index / (values.length - 1)) * plotWidth);
+    const y = padTop + plotHeight - (Math.min(value, cap) / scale) * plotHeight;
+    return { x, y, value };
+  });
+  const ticks = [1, scale / 2, scale].filter(
+    (tick, index, all) => tick >= 1 && all.findIndex((item) => Math.abs(item - tick) < 0.05) === index,
+  );
+
+  return (
+    <svg
+      className="line-chart"
+      viewBox={`0 0 ${width} ${height}`}
+      role="img"
+      aria-label={`Line chart of the last ${values.length} crash values`}
+    >
+      {ticks.map((tick) => {
+        const y = padTop + plotHeight - (Math.min(tick, cap) / scale) * plotHeight;
+        return (
+          <g key={tick}>
+            <line x1={padLeft} x2={width - padRight} y1={y} y2={y} />
+            <text x={padLeft - 8} y={y + 4} textAnchor="end">
+              {formatMultiplier(tick)}
+            </text>
+          </g>
+        );
+      })}
+      <polyline points={points.map((point) => `${point.x},${point.y}`).join(" ")} />
+      {points.map((point, index) => (
+        <circle key={`${point.value}-${index}`} cx={point.x} cy={point.y} r="3.2" className={`dot dot-${band(point.value)}`}>
+          <title>{formatMultiplier(point.value)}</title>
+        </circle>
+      ))}
+    </svg>
+  );
+}
+
+export function RecentCrashDots({ values }: { values: number[] }) {
+  return (
+    <div className="dot-block">
+      <div className="dot-chart" role="list" aria-label={`Dot chart of the last ${values.length} crash values`}>
+        {values.map((value, index) => (
+          <span key={`${value}-${index}`} className={`crash-dot crash-dot-${crashTone(value)}`} title={formatMultiplier(value)} role="listitem">
+            {dotLabel(value)}
+          </span>
+        ))}
+      </div>
+      <p className="dot-key">
+        <span>
+          <i className="swatch crash-dot-red" aria-hidden="true" />
+          Under 2x
+        </span>
+        <span>
+          <i className="swatch crash-dot-green" aria-hidden="true" />
+          2x and above
+        </span>
+        <span>
+          <i className="swatch crash-dot-moon" aria-hidden="true" />
+          10x and above
+        </span>
+      </p>
+    </div>
+  );
+}
+
+function crashTone(value: number): "red" | "green" | "moon" {
+  if (value >= 10) return "moon";
+  if (value >= 2) return "green";
+  return "red";
+}
+
+function dotLabel(value: number): string {
+  if (value >= 100) return `${value.toFixed(0)}x`;
+  if (value >= 10) return `${value.toFixed(1)}x`;
+  return `${value.toFixed(2)}x`;
 }
 
 function band(value: number): "low" | "mid" | "high" {

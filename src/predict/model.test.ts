@@ -124,6 +124,21 @@ describe("predict", () => {
       "last",
       "average",
       "spike",
+      "boost",
+      "forest",
+      "mlp",
+      "cnn",
+      "transformer",
+      "lstm",
+      "nbeats",
+      "logistic",
+      "ridge",
+      "survival",
+      "linear",
+      "tree",
+      "svm",
+      "bayes",
+      "knn",
     ]);
     const nearest = predict({ crashes: CALIBRATED_HISTORY, model: "nearest" });
     expect(nearest.status).toBe("ready");
@@ -155,6 +170,9 @@ describe("predict", () => {
     expect(study.count).toBe(crashes.length);
     expect(study.predicted).toBe(3);
     expect(study.salt).toBeGreaterThan(0);
+    expect(study.checked).toBeGreaterThan(0);
+    expect(study.matches).toBeGreaterThan(0);
+    expect(study.fits).toHaveLength(25);
   });
 
   it("predicts from the sample history without a stake", () => {

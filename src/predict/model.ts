@@ -1,3 +1,5 @@
+import { learnedForecasts } from "./learners";
+
 export type Readiness = "early" | "ready";
 
 export interface ReachRate {
@@ -41,7 +43,22 @@ export type ModelId =
   | "band"
   | "last"
   | "average"
-  | "spike";
+  | "spike"
+  | "boost"
+  | "forest"
+  | "mlp"
+  | "cnn"
+  | "transformer"
+  | "lstm"
+  | "nbeats"
+  | "logistic"
+  | "ridge"
+  | "survival"
+  | "linear"
+  | "tree"
+  | "svm"
+  | "bayes"
+  | "knn";
 
 const MODEL_IDS: ModelId[] = [
   "similar",
@@ -54,6 +71,21 @@ const MODEL_IDS: ModelId[] = [
   "last",
   "average",
   "spike",
+  "boost",
+  "forest",
+  "mlp",
+  "cnn",
+  "transformer",
+  "lstm",
+  "nbeats",
+  "logistic",
+  "ridge",
+  "survival",
+  "linear",
+  "tree",
+  "svm",
+  "bayes",
+  "knn",
 ];
 
 export interface ModelForecast {
@@ -209,6 +241,14 @@ export function predict(input: PredictInput): Prediction {
 
 const SALT_CANDIDATES = [0.2, 0.25, 0.3, 0.35, 0.45, 0.55, 0.7, 0.85, 1, 1.2];
 
+export interface ModelFit {
+  id: ModelId;
+  name: string;
+  predicted: number;
+  matches: number;
+  checked: number;
+}
+
 export interface StudyResult {
   salt: number;
   error: number;
@@ -217,47 +257,97 @@ export interface StudyResult {
   high: number;
   count: number;
   model: ModelId;
+  matches: number;
+  checked: number;
+  fits: ModelFit[];
 }
 
 export function studyModel(crashes: number[]): StudyResult | null {
   const clean = crashes.filter((value) => Number.isFinite(value) && value >= 1);
   if (clean.length < 8) return null;
 
+  const start = Math.max(6, clean.length - 40);
   let bestSalt = DEFAULT_SALT;
-  let bestError = Number.POSITIVE_INFINITY;
+  let saltGrade = gradeModel(clean, DEFAULT_SALT, "similar", start);
   for (const salt of SALT_CANDIDATES) {
-    const error = scoreSalt(clean, salt);
+    const grade = gradeModel(clean, salt, "similar", start);
     const nearer = Math.abs(salt - DEFAULT_SALT) < Math.abs(bestSalt - DEFAULT_SALT);
-    if (error < bestError - 1e-9 || (Math.abs(error - bestError) <= 1e-9 && nearer)) {
+    if (isBetterGrade(grade, saltGrade) || (sameGrade(grade, saltGrade) && nearer)) {
       bestSalt = salt;
-      bestError = error;
+      saltGrade = grade;
     }
   }
 
-  let bestModel: ModelId = "similar";
-  for (const model of MODEL_IDS) {
-    const error = model === "similar" ? bestError : scoreModel(clean, bestSalt, model);
-    if (error < bestError - 1e-9) {
-      bestModel = model;
-      bestError = error;
-    }
-  }
+  const preview = predict({ crashes: clean, salt: bestSalt });
+  if (preview.status !== "ready") return null;
 
-  const prediction = predict({ crashes: clean, salt: bestSalt, model: bestModel });
-  if (prediction.status !== "ready") return null;
+  const graded = preview.models.map((item) => {
+    const grade = item.id === "similar" ? saltGrade : gradeModel(clean, bestSalt, item.id, start);
+    return { item, grade };
+  });
+  const best = graded.reduce((current, next) => (isBetterGrade(next.grade, current.grade) ? next : current));
+
   return {
     salt: bestSalt,
-    error: bestError,
-    predicted: prediction.predicted,
-    low: prediction.low,
-    high: prediction.high,
+    error: best.grade.error,
+    predicted: best.item.predicted,
+    low: best.item.low,
+    high: best.item.high,
     count: clean.length,
-    model: bestModel,
+    model: best.item.id,
+    matches: best.grade.matches,
+    checked: best.grade.checked,
+    fits: graded.map(({ item, grade }) => ({
+      id: item.id,
+      name: item.name,
+      predicted: item.predicted,
+      matches: grade.matches,
+      checked: grade.checked,
+    })),
   };
 }
 
 export function scoreSalt(crashes: number[], salt: number): number {
   return scoreModel(crashes, salt, "similar");
+}
+
+function gradeModel(
+  crashes: number[],
+  salt: number,
+  model: ModelId,
+  start: number,
+): { matches: number; checked: number; error: number } {
+  const misses: number[] = [];
+  let matches = 0;
+  for (let index = start; index < crashes.length; index += 1) {
+    const result = predict({ crashes: crashes.slice(0, index), salt, model });
+    if (result.status !== "ready") continue;
+    const miss = Math.abs(Math.log(result.predicted) - Math.log(crashes[index]));
+    misses.push(miss);
+    if (miss <= Math.log(1.2)) matches += 1;
+  }
+  return { matches, checked: misses.length, error: median(misses) };
+}
+
+function isBetterGrade(
+  next: { matches: number; error: number },
+  current: { matches: number; error: number },
+): boolean {
+  if (next.matches !== current.matches) return next.matches > current.matches;
+  return next.error < current.error - 1e-9;
+}
+
+function sameGrade(
+  next: { matches: number; error: number },
+  current: { matches: number; error: number },
+): boolean {
+  return next.matches === current.matches && Math.abs(next.error - current.error) <= 1e-9;
+}
+
+function median(values: number[]): number {
+  if (values.length === 0) return Number.POSITIVE_INFINITY;
+  const sorted = [...values].sort((left, right) => left - right);
+  return sorted[Math.floor((sorted.length - 1) / 2)];
 }
 
 function scoreModel(crashes: number[], salt: number, model: ModelId): number {
@@ -284,7 +374,7 @@ function buildForecasts(
   const recent = crashes.slice(-20);
   const repeated = repeatValues(crashes);
 
-  return [
+  const forecasts = [
     forecast(
       "similar",
       "Similar lead-in",
@@ -319,7 +409,13 @@ function buildForecasts(
     copyLastForecast(crashes),
     recentAverageForecast(crashes),
     afterSpikeForecast(crashes),
+    ...learnedForecasts(crashes),
   ];
+  return MODEL_IDS.map((id) => {
+    const found = forecasts.find((item) => item.id === id);
+    if (!found) throw new Error(`Missing forecast for ${id}`);
+    return found;
+  });
 }
 
 function afterLastForecast(crashes: number[]): ModelForecast {
