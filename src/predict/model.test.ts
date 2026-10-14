@@ -74,7 +74,7 @@ describe("predict", () => {
     expect(result.predicted).toBe(3);
     expect(result.low).toBe(3);
     expect(result.high).toBe(3);
-    expect(result.similarCount).toBe(20);
+    expect(result.similarCount).toBe(19);
   });
 
   it("marks a short match as an early read", () => {
@@ -95,15 +95,16 @@ describe("predict", () => {
     expect(result.readiness).toBe("ready");
   });
 
-  it("uses salt 0.45 so this history predicts the similar crash of 1.85x", () => {
+  it("uses a 5-round lead-in and salt 0.30 to predict 1.05x", () => {
     const result = predict({ crashes: CALIBRATED_HISTORY });
     expect(result.status).toBe("ready");
     if (result.status !== "ready") return;
-    expect(result.salt).toBe(0.45);
-    expect(result.predicted).toBe(1.85);
+    expect(result.salt).toBe(0.3);
+    expect(result.window).toBe(5);
+    expect(result.predicted).toBe(1.05);
     expect(result.low).toBe(1);
-    expect(result.high).toBe(2.48);
-    expect(result.similarCount).toBe(6);
+    expect(result.high).toBe(1.49);
+    expect(result.similarCount).toBe(5);
     expect(result.readiness).toBe("early");
   });
 
