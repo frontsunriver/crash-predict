@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { batchesOf, fetchCrashPoints, storeCrashPoints, unsavedTail } from "./live/history-sync";
 import {
   appendLivePoints,
+  CALIBRATED_HISTORY,
+  DEFAULT_SALT,
   formatHistory,
   formatMultiplier,
   parseCrashPoints,
@@ -16,14 +19,24 @@ const SAMPLE = sampleCrashes()
 
 export function App() {
   const fileInput = useRef<HTMLInputElement>(null);
-  const [raw, setRaw] = useState("");
+  const [raw, setRaw] = useState(CALIBRATED_HISTORY.map((value) => value.toFixed(2)).join("\n"));
   const [usingSample, setUsingSample] = useState(false);
   const [draft, setDraft] = useState("");
   const [fileNote, setFileNote] = useState("");
   const [liveStatus, setLiveStatus] = useState<"point" | "login" | "idle">("idle");
+  const [salt, setSalt] = useState(String(DEFAULT_SALT));
+  const [loadingDatabase, setLoadingDatabase] = useState(false);
+  const storedRef = useRef<number[] | null>(null);
+  const crashesRef = useRef<number[]>([]);
+  const saveQueue = useRef<Promise<void>>(Promise.resolve());
 
   const crashes = useMemo(() => parseCrashPoints(raw), [raw]);
-  const prediction = useMemo(() => predict({ crashes }), [crashes]);
+  crashesRef.current = crashes;
+  const saltValue = Number(salt);
+  const prediction = useMemo(
+    () => predict({ crashes, salt: saltValue > 0 ? saltValue : DEFAULT_SALT }),
+    [crashes, saltValue],
+  );
   const lastPoint = crashes.length > 0 ? crashes[crashes.length - 1] : null;
 
   function addPoint(event: FormEvent) {
@@ -103,6 +116,46 @@ export function App() {
     };
   }, []);
 
+  useEffect(() => {
+    saveQueue.current = saveQueue.current
+      .catch(() => undefined)
+      .then(async () => {
+        if (storedRef.current === null) storedRef.current = await fetchCrashPoints();
+        const extra = unsavedTail(storedRef.current, crashesRef.current);
+        if (extra.length === 0) return;
+        for (const batch of batchesOf(extra)) {
+          await storeCrashPoints(batch);
+          storedRef.current = [...storedRef.current, ...batch];
+        }
+        if (extra.length >= 200) {
+          setFileNote(`Stored ${extra.length} crash points in the database, 200 at a time.`);
+        }
+      })
+      .catch(() => {
+        setFileNote("Could not store crash points in the database. Keep this app server running.");
+      });
+  }, [crashes]);
+
+  async function loadDatabase() {
+    setLoadingDatabase(true);
+    try {
+      await saveQueue.current.catch(() => undefined);
+      const points = await fetchCrashPoints();
+      storedRef.current = points;
+      setUsingSample(false);
+      if (points.length === 0) {
+        setFileNote("The database has no crash points yet.");
+        return;
+      }
+      setRaw(points.map((value) => value.toFixed(2)).join("\n"));
+      setFileNote(`Loaded ${points.length} crash points from the database.`);
+    } catch {
+      setFileNote("Could not load crash points from the database. Keep this app server running.");
+    } finally {
+      setLoadingDatabase(false);
+    }
+  }
+
   function openHistory(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -168,6 +221,17 @@ export function App() {
             </div>
           </form>
 
+          <label htmlFor="salt">
+            Salt
+            <span>Closer lead-ins when this is lower</span>
+          </label>
+          <input
+            id="salt"
+            inputMode="decimal"
+            value={salt}
+            onChange={(event) => setSalt(event.target.value)}
+          />
+
           <label htmlFor="history">
             Crash history
             <span>{crashes.length} valid points</span>
@@ -189,6 +253,9 @@ export function App() {
             </button>
             <button type="button" className="ghost" onClick={() => fileInput.current?.click()}>
               Load history
+            </button>
+            <button type="button" className="ghost" onClick={() => void loadDatabase()} disabled={loadingDatabase}>
+              Load database
             </button>
             <button type="button" className="ghost" onClick={loadSample}>
               Load sample
@@ -216,8 +283,9 @@ export function App() {
 
       <footer>
         The text file is one crash point per line, oldest first and newest last. Lines that start
-        with # are notes. The predicted point is the middle of similar past rounds, so the next
-        round can still land outside that range.
+        with # are notes. New crash points are stored in the database, 200 at a time, and Load
+        database puts every saved point back into this list. The predicted point is the middle of
+        similar past rounds, so the next round can still land outside that range.
       </footer>
     </div>
   );
@@ -281,6 +349,10 @@ function Decision({
         <div>
           <dt>Lead-in length</dt>
           <dd>{prediction.window} rounds</dd>
+        </div>
+        <div>
+          <dt>Salt</dt>
+          <dd>{prediction.salt.toFixed(2)}</dd>
         </div>
       </dl>
 

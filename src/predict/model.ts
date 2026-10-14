@@ -17,6 +17,7 @@ export interface ReadyPrediction {
   window: number;
   pattern: string;
   leadIn: number[];
+  salt: number;
   reached: ReachRate[];
 }
 
@@ -29,9 +30,22 @@ export type Prediction = ReadyPrediction | NeedData;
 
 export interface PredictInput {
   crashes: number[];
+  salt?: number;
 }
 
-const WINDOWS = [3, 2, 1] as const;
+export const DEFAULT_SALT = 0.45;
+
+export const CALIBRATED_HISTORY = [
+  1.87, 1.94, 1.0, 2.09, 1.07, 1.0, 1.35, 1.0, 4.17, 1.74, 2.08, 1.09, 1.0, 26.29, 1.0, 1.11, 1.61,
+  1.06, 1.84, 3.31, 2.07, 4.4, 53.95, 1.0, 1.0, 1.0, 1.67, 1.85, 1.15, 6.23, 1.0, 2.44, 1.0, 2.13,
+  1.1, 1.0, 12.57, 1.11, 5.98, 5.56, 1.0, 1.23, 6.23, 8.99, 1.0, 1.41, 5.96, 25.55, 52.57, 6.81, 1.0,
+  1.0, 1.0, 1.12, 2.77, 1.0, 1.0, 1.0, 1.1, 1.08, 1.12, 1.12, 58.94, 58.94, 1.0, 1.0, 1.1, 1.08, 1.12,
+  1.12, 58.94, 1.44, 1.84, 7.8, 10.22, 1.0, 1.0, 5.01, 1.47, 1.0, 1.06, 1.17, 8.34, 1.47, 1.15, 3.71,
+  1.16, 15.7, 2.41, 6.62, 3.03, 1.49, 2.43, 3.29, 1.0, 9.79, 10.78, 4.37, 2.2, 1.0, 6.42, 5.94, 34.26,
+  1.0, 1.05, 2.29, 2.48, 6.93, 4.2, 1.07, 1.0, 1.0, 4.35, 55.32, 1.16, 22.86, 1.4, 1.89, 1.14, 1.0, 1.9,
+];
+
+const LEAD_WINDOW = 3;
 
 const REACH_TARGETS = [1.2, 1.5, 2, 3, 5, 10];
 
@@ -104,6 +118,7 @@ export function formatMultiplier(value: number): string {
 
 export function predict(input: PredictInput): Prediction {
   const crashes = input.crashes.filter((value) => Number.isFinite(value) && value >= 1);
+  const salt = input.salt != null && input.salt > 0 ? input.salt : DEFAULT_SALT;
 
   if (crashes.length < 4) {
     return {
@@ -112,29 +127,44 @@ export function predict(input: PredictInput): Prediction {
     };
   }
 
-  const match = matchContext(crashes);
-  if (!match || match.nexts.length === 0) {
+  const window = Math.min(LEAD_WINDOW, crashes.length - 1);
+  const similar = similarRounds(crashes, salt, window);
+  if (similar.length === 0) {
     return {
       status: "need-data",
       message: "Add another crash point so a lead-in has a following round.",
     };
   }
 
-  const sorted = [...match.nexts].sort((a, b) => a - b);
+  const withinSalt = similar.filter((round) => round.distance <= salt).length;
 
   return {
     status: "ready",
-    readiness: match.nexts.length >= MIN_SIMILAR ? "ready" : "early",
-    predicted: quantile(sorted, 0.5),
-    low: quantile(sorted, 0.25),
-    high: quantile(sorted, 0.75),
-    similarCount: match.nexts.length,
-    confidence: confidenceFor(match.nexts.length, match.window),
-    window: match.window,
-    pattern: match.key,
-    leadIn: crashes.slice(-match.window),
+    readiness: withinSalt >= MIN_SIMILAR ? "ready" : "early",
+    predicted: roundMultiplier(weightedQuantile(similar, 0.5)),
+    low: roundMultiplier(weightedQuantile(similar, 0.25)),
+    high: roundMultiplier(weightedQuantile(similar, 0.75)),
+    similarCount: similar.length,
+    confidence: confidenceFor(withinSalt, window),
+    window,
+    pattern: crashes.slice(-window).map(bucket).join(""),
+    leadIn: crashes.slice(-window),
+    salt,
     reached: reachRates(crashes),
   };
+}
+
+export function scoreSalt(crashes: number[], salt: number): number {
+  if (crashes.length < 8) return Number.POSITIVE_INFINITY;
+  let error = 0;
+  let count = 0;
+  for (let index = 6; index < crashes.length; index += 1) {
+    const result = predict({ crashes: crashes.slice(0, index), salt });
+    if (result.status !== "ready") continue;
+    error += Math.abs(Math.log(result.predicted) - Math.log(crashes[index]));
+    count += 1;
+  }
+  return count === 0 ? Number.POSITIVE_INFINITY : error / count;
 }
 
 function confidenceFor(similarCount: number, window: number): "low" | "medium" | "high" {
@@ -149,31 +179,49 @@ function bucket(value: number): "L" | "M" | "H" {
   return "H";
 }
 
-function contextKey(crashes: number[], endExclusive: number, window: number): string {
-  return crashes
-    .slice(endExclusive - window, endExclusive)
-    .map(bucket)
-    .join("");
+function similarRounds(
+  crashes: number[],
+  salt: number,
+  window: number,
+): Array<{ value: number; distance: number; weight: number }> {
+  const scored: Array<{ value: number; distance: number }> = [];
+  for (let index = window; index < crashes.length; index += 1) {
+    scored.push({ value: crashes[index], distance: leadDistance(crashes, index, window) });
+  }
+  scored.sort((left, right) => left.distance - right.distance);
+  const within = scored.filter((round) => round.distance <= salt);
+  const chosen = within.length >= 3 ? within : scored.slice(0, Math.min(5, scored.length));
+  return chosen.map((round) => ({
+    ...round,
+    weight: Math.exp(-round.distance / Math.max(salt, 0.05)),
+  }));
 }
 
-function matchContext(crashes: number[]): { window: number; key: string; nexts: number[] } | null {
-  let fallback: { window: number; key: string; nexts: number[] } | null = null;
-
-  for (const window of WINDOWS) {
-    if (crashes.length <= window) continue;
-    const key = contextKey(crashes, crashes.length, window);
-    const nexts: number[] = [];
-
-    for (let index = window; index < crashes.length; index += 1) {
-      if (contextKey(crashes, index, window) === key) nexts.push(crashes[index]);
-    }
-
-    const candidate = { window, key, nexts };
-    if (nexts.length >= MIN_SIMILAR) return candidate;
-    if (!fallback || nexts.length > fallback.nexts.length) fallback = candidate;
+function leadDistance(crashes: number[], index: number, window: number): number {
+  let max = 0;
+  const end = crashes.length;
+  for (let step = 1; step <= window; step += 1) {
+    max = Math.max(max, Math.abs(Math.log(crashes[index - step]) - Math.log(crashes[end - step])));
   }
+  return max;
+}
 
-  return fallback;
+function weightedQuantile(
+  rounds: Array<{ value: number; weight: number }>,
+  quantile: number,
+): number {
+  const sorted = [...rounds].sort((left, right) => left.value - right.value);
+  const total = sorted.reduce((sum, round) => sum + round.weight, 0);
+  let covered = 0;
+  for (const round of sorted) {
+    covered += round.weight;
+    if (covered >= total * quantile) return round.value;
+  }
+  return sorted[sorted.length - 1].value;
+}
+
+function roundMultiplier(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function reachRates(values: number[]): ReachRate[] {
@@ -185,16 +233,6 @@ function reachRates(values: number[]): ReachRate[] {
       hitRate: values.length === 0 ? 0 : hits / values.length,
     };
   });
-}
-
-function quantile(sorted: number[], q: number): number {
-  if (sorted.length === 1) return sorted[0];
-  const position = (sorted.length - 1) * q;
-  const low = Math.floor(position);
-  const high = Math.ceil(position);
-  if (low === high) return sorted[low];
-  const weight = position - low;
-  return sorted[low] * (1 - weight) + sorted[high] * weight;
 }
 
 export function patternPhrase(pattern: string): string {

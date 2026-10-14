@@ -1,10 +1,12 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { appendCrashBatches, openCrashStore, type CrashStore } from "./src/server/crash-store";
 
 type LiveRequest = {
   url?: string;
   method?: string;
+  on?: (event: string, listener: (...args: never[]) => void) => void;
 };
 
 type LiveResponse = {
@@ -17,7 +19,9 @@ type Middleware = (req: LiveRequest, res: LiveResponse, next: () => void) => voi
 
 type LiveStatus = "point" | "login" | "idle";
 
-const scriptPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "scripts", "read-live-crash.ps1");
+const rootDir = path.dirname(fileURLToPath(import.meta.url));
+const scriptPath = path.join(rootDir, "scripts", "read-live-crash.ps1");
+const databasePath = path.join(rootDir, "data", "crash-points.sqlite");
 
 export function crashLivePlugin() {
   let seq = 0;
@@ -75,13 +79,20 @@ export function crashLivePlugin() {
     }, 2000);
   };
 
+  let store: CrashStore | undefined;
+  const crashes = () => {
+    store ??= openCrashStore(databasePath);
+    return store;
+  };
+
   const handler: Middleware = (req, res, next) => {
-    if (req.url?.split("?")[0] !== "/api/live-crash") {
+    const pathname = req.url?.split("?")[0];
+    if (pathname !== "/api/live-crash" && pathname !== "/api/crash-points") {
       next();
       return;
     }
     res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     if (req.method === "OPTIONS") {
       res.statusCode = 204;
@@ -89,7 +100,11 @@ export function crashLivePlugin() {
       return;
     }
     res.setHeader("Content-Type", "application/json");
-    res.end(JSON.stringify({ seq, points, status }));
+    if (pathname === "/api/live-crash") {
+      res.end(JSON.stringify({ seq, points, status }));
+      return;
+    }
+    void handleCrashPoints(req, res, crashes());
   };
 
   return {
@@ -103,4 +118,41 @@ export function crashLivePlugin() {
       server.middlewares.use(handler);
     },
   };
+}
+
+function readBody(req: LiveRequest): Promise<string> {
+  return new Promise((resolve, reject) => {
+    if (!req.on) {
+      reject(new Error("This request has no body."));
+      return;
+    }
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk?: Buffer) => {
+      if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("error", () => reject(new Error("Could not read the crash points.")));
+  });
+}
+
+async function handleCrashPoints(req: LiveRequest, res: LiveResponse, store: CrashStore) {
+  try {
+    if (req.method === "GET") {
+      const points = store.all();
+      res.end(JSON.stringify({ count: points.length, points }));
+      return;
+    }
+    if (req.method !== "POST") {
+      res.statusCode = 405;
+      res.end(JSON.stringify({ error: "Use GET or POST." }));
+      return;
+    }
+    const body = JSON.parse(await readBody(req)) as { points?: unknown };
+    const points = Array.isArray(body.points) ? body.points.map(Number) : [];
+    const result = appendCrashBatches(store, points);
+    res.end(JSON.stringify(result));
+  } catch (error) {
+    res.statusCode = 400;
+    res.end(JSON.stringify({ error: error instanceof Error ? error.message : "Could not store crash points." }));
+  }
 }

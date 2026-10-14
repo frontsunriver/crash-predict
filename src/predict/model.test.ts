@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { appendLivePoints, formatHistory, parseCrashPoints, predict, sampleCrashes } from "./model";
+import {
+  CALIBRATED_HISTORY,
+  appendLivePoints,
+  formatHistory,
+  parseCrashPoints,
+  predict,
+  sampleCrashes,
+} from "./model";
 
 function repeatingEdge(): number[] {
   const crashes: number[] = [];
@@ -86,6 +93,29 @@ describe("predict", () => {
     if (result.status !== "ready") return;
     expect(result.predicted).toBeCloseTo(1.01);
     expect(result.readiness).toBe("ready");
+  });
+
+  it("uses salt 0.45 so this history predicts the similar crash of 1.85x", () => {
+    const result = predict({ crashes: CALIBRATED_HISTORY });
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    expect(result.salt).toBe(0.45);
+    expect(result.predicted).toBe(1.85);
+    expect(result.low).toBe(1);
+    expect(result.high).toBe(2.48);
+    expect(result.similarCount).toBe(6);
+    expect(result.readiness).toBe("early");
+  });
+
+  it("uses a tighter salt to follow lead-ins that look like the latest rounds", () => {
+    const history = [1.87, 1.94, 1, 2.09, 1.07, 1, 1.35, 1, 4.17, 1.74, 2.08, 1.09, 1, 1.11, 1.61, 1.15];
+    const wide = predict({ crashes: history, salt: 1.2 });
+    const tight = predict({ crashes: history, salt: 0.12 });
+    expect(wide.status).toBe("ready");
+    expect(tight.status).toBe("ready");
+    if (wide.status !== "ready" || tight.status !== "ready") return;
+    expect(tight.similarCount).toBeLessThanOrEqual(wide.similarCount);
+    expect(tight.predicted).toBeGreaterThanOrEqual(1);
   });
 
   it("predicts from the sample history without a stake", () => {
