@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, type ChangeEvent, type FormEvent 
 import { batchesOf, fetchCrashPoints, storeCrashPoints, unsavedTail } from "./live/history-sync";
 import {
   appendLivePoints,
-  CALIBRATED_HISTORY,
   DEFAULT_SALT,
   formatHistory,
   formatMultiplier,
@@ -10,6 +9,7 @@ import {
   patternPhrase,
   predict,
   sampleCrashes,
+  studyModel,
   type ReadyPrediction,
 } from "./predict/model";
 
@@ -19,13 +19,14 @@ const SAMPLE = sampleCrashes()
 
 export function App() {
   const fileInput = useRef<HTMLInputElement>(null);
-  const [raw, setRaw] = useState(CALIBRATED_HISTORY.map((value) => value.toFixed(2)).join("\n"));
+  const [raw, setRaw] = useState("");
   const [usingSample, setUsingSample] = useState(false);
   const [draft, setDraft] = useState("");
   const [fileNote, setFileNote] = useState("");
   const [liveStatus, setLiveStatus] = useState<"point" | "login" | "idle">("idle");
   const [salt, setSalt] = useState(String(DEFAULT_SALT));
   const [loadingDatabase, setLoadingDatabase] = useState(false);
+  const [studying, setStudying] = useState(false);
   const storedRef = useRef<number[] | null>(null);
   const crashesRef = useRef<number[]>([]);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
@@ -136,6 +137,25 @@ export function App() {
       });
   }, [crashes]);
 
+  useEffect(() => {
+    let stopped = false;
+    void (async () => {
+      try {
+        const points = await fetchCrashPoints();
+        if (stopped || points.length === 0) return;
+        storedRef.current = points;
+        setUsingSample(false);
+        setRaw(points.map((value) => value.toFixed(2)).join("\n"));
+        setFileNote(`Predicting from ${points.length} crash points in the database.`);
+      } catch {
+        // The database route is only present while this app server is running.
+      }
+    })();
+    return () => {
+      stopped = true;
+    };
+  }, []);
+
   async function loadDatabase() {
     setLoadingDatabase(true);
     try {
@@ -153,6 +173,35 @@ export function App() {
       setFileNote("Could not load crash points from the database. Keep this app server running.");
     } finally {
       setLoadingDatabase(false);
+    }
+  }
+
+  async function studyDatabase() {
+    setStudying(true);
+    setFileNote("Studying every crash point in the database.");
+    try {
+      await saveQueue.current.catch(() => undefined);
+      const points = await fetchCrashPoints();
+      storedRef.current = points;
+      if (points.length < 8) {
+        setFileNote("The database needs at least 8 crash points before the model can be studied.");
+        return;
+      }
+      const study = studyModel(points);
+      if (!study) {
+        setFileNote("The database did not produce a prediction.");
+        return;
+      }
+      setUsingSample(false);
+      setRaw(points.map((value) => value.toFixed(2)).join("\n"));
+      setSalt(study.salt.toFixed(2));
+      setFileNote(
+        `Studied ${study.count} database points. Salt is ${study.salt.toFixed(2)}. Predicted crash is ${study.predicted.toFixed(2)}x.`,
+      );
+    } catch {
+      setFileNote("Could not study the database. Keep this app server running.");
+    } finally {
+      setStudying(false);
     }
   }
 
@@ -257,6 +306,9 @@ export function App() {
             <button type="button" className="ghost" onClick={() => void loadDatabase()} disabled={loadingDatabase}>
               Load database
             </button>
+            <button type="button" className="ghost" onClick={() => void studyDatabase()} disabled={studying}>
+              Study
+            </button>
             <button type="button" className="ghost" onClick={loadSample}>
               Load sample
             </button>
@@ -283,9 +335,9 @@ export function App() {
 
       <footer>
         The text file is one crash point per line, oldest first and newest last. Lines that start
-        with # are notes. New crash points are stored in the database, 200 at a time, and Load
-        database puts every saved point back into this list. The predicted point is the middle of
-        similar past rounds, so the next round can still land outside that range.
+        with # are notes. New crash points are stored in the database, 200 at a time. Study reads
+        every saved point, fits the salt, and predicts from that full list. The predicted point is
+        the middle of similar past rounds, so the next round can still land outside that range.
       </footer>
     </div>
   );
@@ -386,8 +438,8 @@ function NeedData({
       <h2>{message}</h2>
       <p>
         {count} valid crash point{count === 1 ? "" : "s"} so far.
-        {lastPoint != null ? ` Last one is ${formatMultiplier(lastPoint)}.` : ""} Add points, load a
-        text file, or leave the CRYGODI crash game open.
+        {lastPoint != null ? ` Last one is ${formatMultiplier(lastPoint)}.` : ""} Load database to
+        predict from every saved point, or leave the CRYGODI crash game open.
       </p>
     </div>
   );

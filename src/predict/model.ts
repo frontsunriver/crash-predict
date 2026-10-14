@@ -162,6 +162,44 @@ export function predict(input: PredictInput): Prediction {
   };
 }
 
+const SALT_CANDIDATES = [0.2, 0.25, 0.3, 0.35, 0.45, 0.55, 0.7, 0.85, 1, 1.2];
+
+export interface StudyResult {
+  salt: number;
+  error: number;
+  predicted: number;
+  low: number;
+  high: number;
+  count: number;
+}
+
+export function studyModel(crashes: number[]): StudyResult | null {
+  const clean = crashes.filter((value) => Number.isFinite(value) && value >= 1);
+  if (clean.length < 8) return null;
+
+  let bestSalt = DEFAULT_SALT;
+  let bestError = Number.POSITIVE_INFINITY;
+  for (const salt of SALT_CANDIDATES) {
+    const error = scoreSalt(clean, salt);
+    const nearer = Math.abs(salt - DEFAULT_SALT) < Math.abs(bestSalt - DEFAULT_SALT);
+    if (error < bestError - 1e-9 || (Math.abs(error - bestError) <= 1e-9 && nearer)) {
+      bestSalt = salt;
+      bestError = error;
+    }
+  }
+
+  const prediction = predict({ crashes: clean, salt: bestSalt });
+  if (prediction.status !== "ready") return null;
+  return {
+    salt: bestSalt,
+    error: bestError,
+    predicted: prediction.predicted,
+    low: prediction.low,
+    high: prediction.high,
+    count: clean.length,
+  };
+}
+
 export function scoreSalt(crashes: number[], salt: number): number {
   if (crashes.length < 8) return Number.POSITIVE_INFINITY;
   let error = 0;

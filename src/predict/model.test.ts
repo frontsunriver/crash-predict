@@ -6,6 +6,7 @@ import {
   parseCrashPoints,
   predict,
   sampleCrashes,
+  studyModel,
 } from "./model";
 
 function repeatingEdge(): number[] {
@@ -117,6 +118,20 @@ describe("predict", () => {
     if (wide.status !== "ready" || tight.status !== "ready") return;
     expect(tight.similarCount).toBeLessThanOrEqual(wide.similarCount);
     expect(tight.predicted).toBeGreaterThanOrEqual(1);
+  });
+
+  it("asks for more points before studying the model", () => {
+    expect(studyModel([1, 1.2, 1.4, 2, 1.1, 1.3, 1.5])).toBeNull();
+  });
+
+  it("studies a repeating lead-in from the supplied points", () => {
+    const crashes = repeatingEdge();
+    const study = studyModel(crashes);
+    expect(study).not.toBeNull();
+    if (!study) return;
+    expect(study.count).toBe(crashes.length);
+    expect(study.predicted).toBe(3);
+    expect(study.salt).toBeGreaterThan(0);
   });
 
   it("predicts from the sample history without a stake", () => {
