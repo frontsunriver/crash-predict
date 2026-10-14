@@ -18,6 +18,9 @@ export interface ReadyPrediction {
   pattern: string;
   leadIn: number[];
   salt: number;
+  model: ModelId;
+  models: ModelForecast[];
+  summary: string;
   reached: ReachRate[];
 }
 
@@ -28,9 +31,45 @@ export interface NeedData {
 
 export type Prediction = ReadyPrediction | NeedData;
 
+export type ModelId =
+  | "similar"
+  | "nearest"
+  | "repeat"
+  | "recent"
+  | "history"
+  | "after"
+  | "band"
+  | "last"
+  | "average"
+  | "spike";
+
+const MODEL_IDS: ModelId[] = [
+  "similar",
+  "nearest",
+  "repeat",
+  "recent",
+  "history",
+  "after",
+  "band",
+  "last",
+  "average",
+  "spike",
+];
+
+export interface ModelForecast {
+  id: ModelId;
+  name: string;
+  detail: string;
+  predicted: number;
+  low: number;
+  high: number;
+  summary: string;
+}
+
 export interface PredictInput {
   crashes: number[];
   salt?: number;
+  model?: ModelId;
 }
 
 export const DEFAULT_SALT = 0.3;
@@ -127,6 +166,7 @@ export function formatMultiplier(value: number): string {
 export function predict(input: PredictInput): Prediction {
   const crashes = input.crashes.filter((value) => Number.isFinite(value) && value >= 1);
   const salt = input.salt != null && input.salt > 0 ? input.salt : DEFAULT_SALT;
+  const model = input.model ?? "similar";
 
   if (crashes.length < 4) {
     return {
@@ -144,20 +184,25 @@ export function predict(input: PredictInput): Prediction {
     };
   }
 
+  const models = buildForecasts(crashes, similar);
+  const selected = models.find((item) => item.id === model) ?? models[0];
   const withinSalt = similar.filter((round) => round.distance <= salt).length;
 
   return {
     status: "ready",
     readiness: withinSalt >= MIN_SIMILAR ? "ready" : "early",
-    predicted: roundMultiplier(weightedQuantile(similar, 0.5)),
-    low: roundMultiplier(weightedQuantile(similar, 0.25)),
-    high: roundMultiplier(weightedQuantile(similar, 0.75)),
+    predicted: selected.predicted,
+    low: selected.low,
+    high: selected.high,
     similarCount: similar.length,
     confidence: confidenceFor(withinSalt, window),
     window,
     pattern: crashes.slice(-window).map(bucket).join(""),
     leadIn: crashes.slice(-window),
     salt,
+    model: selected.id,
+    models,
+    summary: selected.summary,
     reached: reachRates(crashes),
   };
 }
@@ -171,6 +216,7 @@ export interface StudyResult {
   low: number;
   high: number;
   count: number;
+  model: ModelId;
 }
 
 export function studyModel(crashes: number[]): StudyResult | null {
@@ -188,7 +234,16 @@ export function studyModel(crashes: number[]): StudyResult | null {
     }
   }
 
-  const prediction = predict({ crashes: clean, salt: bestSalt });
+  let bestModel: ModelId = "similar";
+  for (const model of MODEL_IDS) {
+    const error = model === "similar" ? bestError : scoreModel(clean, bestSalt, model);
+    if (error < bestError - 1e-9) {
+      bestModel = model;
+      bestError = error;
+    }
+  }
+
+  const prediction = predict({ crashes: clean, salt: bestSalt, model: bestModel });
   if (prediction.status !== "ready") return null;
   return {
     salt: bestSalt,
@@ -197,20 +252,256 @@ export function studyModel(crashes: number[]): StudyResult | null {
     low: prediction.low,
     high: prediction.high,
     count: clean.length,
+    model: bestModel,
   };
 }
 
 export function scoreSalt(crashes: number[], salt: number): number {
+  return scoreModel(crashes, salt, "similar");
+}
+
+function scoreModel(crashes: number[], salt: number, model: ModelId): number {
   if (crashes.length < 8) return Number.POSITIVE_INFINITY;
   let error = 0;
   let count = 0;
   for (let index = 6; index < crashes.length; index += 1) {
-    const result = predict({ crashes: crashes.slice(0, index), salt });
+    const result = predict({ crashes: crashes.slice(0, index), salt, model });
     if (result.status !== "ready") continue;
     error += Math.abs(Math.log(result.predicted) - Math.log(crashes[index]));
     count += 1;
   }
   return count === 0 ? Number.POSITIVE_INFINITY : error / count;
+}
+
+function buildForecasts(
+  crashes: number[],
+  similar: Array<{ value: number; distance: number; weight: number }>,
+): ModelForecast[] {
+  const similarLow = roundMultiplier(weightedQuantile(similar, 0.25));
+  const similarMid = roundMultiplier(weightedQuantile(similar, 0.5));
+  const similarHigh = roundMultiplier(weightedQuantile(similar, 0.75));
+  const nearestValues = similar.slice(0, Math.min(3, similar.length)).map((round) => round.value);
+  const recent = crashes.slice(-20);
+  const repeated = repeatValues(crashes);
+
+  return [
+    forecast(
+      "similar",
+      "Similar lead-in",
+      "5-round matches",
+      similarMid,
+      similarLow,
+      similarHigh,
+      `Similar lead-ins were followed by a middle crash of ${formatMultiplier(similarMid)}, between ${formatMultiplier(similarLow)} and ${formatMultiplier(similarHigh)}.`,
+    ),
+    forecast(
+      "nearest",
+      "Nearest lead-in",
+      "Closest past match",
+      roundMultiplier(similar[0].value),
+      roundMultiplier(Math.min(...nearestValues)),
+      roundMultiplier(Math.max(...nearestValues)),
+      `The closest lead-in was followed by ${formatMultiplier(similar[0].value)}.`,
+    ),
+    forecast(
+      "repeat",
+      "Repeated stretch",
+      repeated.detail,
+      repeated.predicted,
+      repeated.low,
+      repeated.high,
+      repeated.summary,
+    ),
+    levelForecast("recent", "Recent median", "Last 20 crashes", recent),
+    levelForecast("history", "Full history", "Every saved crash", crashes),
+    afterLastForecast(crashes),
+    sameBandForecast(crashes),
+    copyLastForecast(crashes),
+    recentAverageForecast(crashes),
+    afterSpikeForecast(crashes),
+  ];
+}
+
+function afterLastForecast(crashes: number[]): ModelForecast {
+  const last = crashes[crashes.length - 1];
+  const followed = crashes.filter((_, index) => {
+    if (index === 0) return false;
+    return Math.abs(Math.log(crashes[index - 1]) - Math.log(last)) <= 0.3;
+  });
+  const values = followed.length >= 3 ? followed : nearestAfter(crashes, last, 8);
+  const predicted = roundMultiplier(plainQuantile(values, 0.5));
+  const low = roundMultiplier(plainQuantile(values, 0.25));
+  const high = roundMultiplier(plainQuantile(values, 0.75));
+  return forecast(
+    "after",
+    "After last crash",
+    `Near ${formatMultiplier(last)}`,
+    predicted,
+    low,
+    high,
+    `Crashes near ${formatMultiplier(last)} were followed by a middle crash of ${formatMultiplier(predicted)}.`,
+  );
+}
+
+function sameBandForecast(crashes: number[]): ModelForecast {
+  const mark = bucket(crashes[crashes.length - 1]);
+  const names = { L: "under 2x", M: "2x to 5x", H: "5x or more" };
+  const followed: number[] = [];
+  for (let index = 1; index < crashes.length; index += 1) {
+    if (bucket(crashes[index - 1]) === mark) followed.push(crashes[index]);
+  }
+  const values = followed.length > 0 ? followed : [crashes[crashes.length - 1]];
+  const predicted = roundMultiplier(plainQuantile(values, 0.5));
+  const low = roundMultiplier(plainQuantile(values, 0.25));
+  const high = roundMultiplier(plainQuantile(values, 0.75));
+  return forecast(
+    "band",
+    "Same band",
+    `After ${names[mark]}`,
+    predicted,
+    low,
+    high,
+    `After a crash ${names[mark]}, the middle next crash was ${formatMultiplier(predicted)}.`,
+  );
+}
+
+function copyLastForecast(crashes: number[]): ModelForecast {
+  const last = roundMultiplier(crashes[crashes.length - 1]);
+  return forecast(
+    "last",
+    "Copy last",
+    "Same as newest",
+    last,
+    last,
+    last,
+    `This model repeats the newest crash, ${formatMultiplier(last)}.`,
+  );
+}
+
+function recentAverageForecast(crashes: number[]): ModelForecast {
+  const recent = crashes.slice(-10);
+  const average = roundMultiplier(Math.exp(recent.reduce((sum, value) => sum + Math.log(value), 0) / recent.length));
+  const low = roundMultiplier(plainQuantile(recent, 0.25));
+  const high = roundMultiplier(plainQuantile(recent, 0.75));
+  return forecast(
+    "average",
+    "Recent average",
+    "Last 10 crashes",
+    average,
+    Math.min(low, average),
+    Math.max(high, average),
+    `The average of the last 10 crashes is ${formatMultiplier(average)}.`,
+  );
+}
+
+function afterSpikeForecast(crashes: number[]): ModelForecast {
+  const followed: number[] = [];
+  for (let index = 1; index < crashes.length; index += 1) {
+    if (crashes[index - 1] >= 5) followed.push(crashes[index]);
+  }
+  const values = followed.length > 0 ? followed : crashes;
+  const predicted = roundMultiplier(plainQuantile(values, 0.5));
+  const low = roundMultiplier(plainQuantile(values, 0.25));
+  const high = roundMultiplier(plainQuantile(values, 0.75));
+  return forecast(
+    "spike",
+    "After 5x",
+    "Follows 5x or more",
+    predicted,
+    low,
+    high,
+    `After a crash of 5x or more, the middle next crash was ${formatMultiplier(predicted)}.`,
+  );
+}
+
+function nearestAfter(crashes: number[], last: number, count: number): number[] {
+  return crashes
+    .map((value, index) => ({
+      value,
+      distance: index === 0 ? Number.POSITIVE_INFINITY : Math.abs(Math.log(crashes[index - 1]) - Math.log(last)),
+    }))
+    .filter((round) => Number.isFinite(round.distance))
+    .sort((left, right) => left.distance - right.distance)
+    .slice(0, count)
+    .map((round) => round.value);
+}
+
+function forecast(
+  id: ModelId,
+  name: string,
+  detail: string,
+  predicted: number,
+  low: number,
+  high: number,
+  summary: string,
+): ModelForecast {
+  return { id, name, detail, predicted, low, high, summary };
+}
+
+function levelForecast(id: ModelId, name: string, detail: string, values: number[]): ModelForecast {
+  const predicted = roundMultiplier(plainQuantile(values, 0.5));
+  const low = roundMultiplier(plainQuantile(values, 0.25));
+  const high = roundMultiplier(plainQuantile(values, 0.75));
+  return forecast(
+    id,
+    name,
+    detail,
+    predicted,
+    low,
+    high,
+    `${detail} have a middle crash of ${formatMultiplier(predicted)}, between ${formatMultiplier(low)} and ${formatMultiplier(high)}.`,
+  );
+}
+
+function repeatValues(crashes: number[]): {
+  predicted: number;
+  low: number;
+  high: number;
+  detail: string;
+  summary: string;
+} {
+  const longest = Math.min(8, crashes.length - 1);
+  for (let window = longest; window >= 1; window -= 1) {
+    const matches: number[] = [];
+    for (let index = window; index <= crashes.length - window; index += 1) {
+      let matchesLead = true;
+      for (let step = 1; step <= window; step += 1) {
+        const previous = crashes[index - step];
+        const current = crashes[crashes.length - step];
+        if (Math.abs(Math.log(previous) - Math.log(current)) > 0.08) {
+          matchesLead = false;
+          break;
+        }
+      }
+      if (matchesLead) matches.push(crashes[index]);
+    }
+    if (matches.length === 0) continue;
+    const predicted = roundMultiplier(plainQuantile(matches, 0.5));
+    const low = roundMultiplier(plainQuantile(matches, 0.25));
+    const high = roundMultiplier(plainQuantile(matches, 0.75));
+    return {
+      predicted,
+      low,
+      high,
+      detail: `${window}-round copy`,
+      summary: `A repeated ${window}-round stretch was followed by ${formatMultiplier(predicted)}.`,
+    };
+  }
+
+  const last = roundMultiplier(crashes[crashes.length - 1]);
+  return {
+    predicted: last,
+    low: last,
+    high: last,
+    detail: "No earlier copy",
+    summary: `No earlier stretch matches the latest crashes. The last crash was ${formatMultiplier(last)}.`,
+  };
+}
+
+function plainQuantile(values: number[], quantile: number): number {
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * quantile) - 1));
+  return sorted[index];
 }
 
 function confidenceFor(similarCount: number, window: number): "low" | "medium" | "high" {

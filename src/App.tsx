@@ -10,6 +10,7 @@ import {
   predict,
   sampleCrashes,
   studyModel,
+  type ModelId,
   type ReadyPrediction,
 } from "./predict/model";
 
@@ -25,6 +26,7 @@ export function App() {
   const [fileNote, setFileNote] = useState("");
   const [liveStatus, setLiveStatus] = useState<"point" | "login" | "idle">("idle");
   const [salt, setSalt] = useState(String(DEFAULT_SALT));
+  const [model, setModel] = useState<ModelId>("similar");
   const [loadingDatabase, setLoadingDatabase] = useState(false);
   const [studying, setStudying] = useState(false);
   const storedRef = useRef<number[] | null>(null);
@@ -35,8 +37,8 @@ export function App() {
   crashesRef.current = crashes;
   const saltValue = Number(salt);
   const prediction = useMemo(
-    () => predict({ crashes, salt: saltValue > 0 ? saltValue : DEFAULT_SALT }),
-    [crashes, saltValue],
+    () => predict({ crashes, salt: saltValue > 0 ? saltValue : DEFAULT_SALT, model }),
+    [crashes, saltValue, model],
   );
   const lastPoint = crashes.length > 0 ? crashes[crashes.length - 1] : null;
 
@@ -195,8 +197,9 @@ export function App() {
       setUsingSample(false);
       setRaw(points.map((value) => value.toFixed(2)).join("\n"));
       setSalt(study.salt.toFixed(2));
+      setModel(study.model);
       setFileNote(
-        `Studied ${study.count} database points. Salt is ${study.salt.toFixed(2)}. Predicted crash is ${study.predicted.toFixed(2)}x.`,
+        `Studied ${study.count} database points. The closest model predicts ${study.predicted.toFixed(2)}x at salt ${study.salt.toFixed(2)}.`,
       );
     } catch {
       setFileNote("Could not study the database. Keep this app server running.");
@@ -246,7 +249,7 @@ export function App() {
           {prediction.status === "need-data" ? (
             <NeedData message={prediction.message} count={crashes.length} lastPoint={lastPoint} />
           ) : (
-            <Decision prediction={prediction} lastPoint={lastPoint} />
+            <Decision prediction={prediction} lastPoint={lastPoint} onSelectModel={setModel} />
           )}
         </section>
 
@@ -336,8 +339,8 @@ export function App() {
       <footer>
         The text file is one crash point per line, oldest first and newest last. Lines that start
         with # are notes. New crash points are stored in the database, 200 at a time. Study reads
-        every saved point, fits the salt, and predicts from that full list. The predicted point is
-        the middle of similar past rounds, so the next round can still land outside that range.
+        every saved point and chooses the model whose past guesses were closest. Pick another
+        model to use that prediction instead. The next round can still land outside the range.
       </footer>
     </div>
   );
@@ -354,9 +357,11 @@ function liveStatusText(status: "point" | "login" | "idle"): string {
 function Decision({
   prediction,
   lastPoint,
+  onSelectModel,
 }: {
   prediction: ReadyPrediction;
   lastPoint: number | null;
+  onSelectModel: (model: ModelId) => void;
 }) {
   const early = prediction.readiness === "early";
 
@@ -378,7 +383,7 @@ function Decision({
         <article>
           <p>Predicted crash</p>
           <strong>{formatMultiplier(prediction.predicted)}</strong>
-          <em>Median crash after this lead-in</em>
+          <em>{prediction.models.find((item) => item.id === prediction.model)?.name}</em>
         </article>
         <article>
           <p>Likely range</p>
@@ -408,7 +413,22 @@ function Decision({
         </div>
       </dl>
 
-      <p className="explain">{explain(prediction)}</p>
+      <div className="model-grid" role="group" aria-label="Predict model">
+        {prediction.models.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            className={item.id === prediction.model ? "model-option selected" : "model-option"}
+            onClick={() => onSelectModel(item.id)}
+          >
+            <span>{item.name}</span>
+            <strong>{formatMultiplier(item.predicted)}</strong>
+            <small>{item.detail}</small>
+          </button>
+        ))}
+      </div>
+
+      <p className="explain">{prediction.summary}</p>
 
       <div className="lead">
         <span>Lead-in</span>
@@ -501,18 +521,6 @@ function Mark() {
       <path d="M8 32c6-2 8-14 14-14s6 10 12 8 4-12 6-14" />
     </svg>
   );
-}
-
-function explain(prediction: ReadyPrediction): string {
-  const predicted = formatMultiplier(prediction.predicted);
-  const low = formatMultiplier(prediction.low);
-  const high = formatMultiplier(prediction.high);
-
-  if (prediction.readiness === "early") {
-    return `Only ${prediction.similarCount} past rounds match this lead-in. Their middle crash was ${predicted}, between ${low} and ${high}. Add more points before treating that as a stable prediction.`;
-  }
-
-  return `After a lead-in like this, ${prediction.similarCount} similar rounds crashed at a middle value of ${predicted}. Half of them landed between ${low} and ${high}.`;
 }
 
 function band(value: number): "low" | "mid" | "high" {

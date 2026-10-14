@@ -109,6 +109,29 @@ describe("predict", () => {
     expect(result.readiness).toBe("early");
   });
 
+  it("offers several predict models with different crash estimates", () => {
+    const result = predict({ crashes: CALIBRATED_HISTORY });
+    expect(result.status).toBe("ready");
+    if (result.status !== "ready") return;
+    expect(result.models.map((item) => item.id)).toEqual([
+      "similar",
+      "nearest",
+      "repeat",
+      "recent",
+      "history",
+      "after",
+      "band",
+      "last",
+      "average",
+      "spike",
+    ]);
+    const nearest = predict({ crashes: CALIBRATED_HISTORY, model: "nearest" });
+    expect(nearest.status).toBe("ready");
+    if (nearest.status !== "ready") return;
+    expect(nearest.model).toBe("nearest");
+    expect(nearest.predicted).not.toBe(result.predicted);
+  });
+
   it("uses a tighter salt to follow lead-ins that look like the latest rounds", () => {
     const history = [1.87, 1.94, 1, 2.09, 1.07, 1, 1.35, 1, 4.17, 1.74, 2.08, 1.09, 1, 1.11, 1.61, 1.15];
     const wide = predict({ crashes: history, salt: 1.2 });
