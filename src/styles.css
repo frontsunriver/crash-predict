@@ -633,7 +633,7 @@ fieldset {
 .dot-chart {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
+  gap: 4px;
   overflow-x: auto;
   padding-bottom: 4px;
 }
@@ -641,21 +641,19 @@ fieldset {
 .dot-column {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   flex: none;
 }
 
 .crash-dot {
-  width: 36px;
-  height: 36px;
+  width: 16px;
+  height: 16px;
   border-radius: 50%;
   display: inline-grid;
   place-items: center;
-  font-size: 10px;
-  font-weight: 650;
-  letter-spacing: -0.03em;
+  overflow: hidden;
+  font-size: 0;
   line-height: 1;
-  font-variant-numeric: tabular-nums;
 }
 
 .crash-dot-red {
@@ -784,8 +782,7 @@ footer {
   }
 
   .crash-dot {
-    width: 32px;
-    height: 32px;
-    font-size: 9px;
+    width: 14px;
+    height: 14px;
   }
 }

@@ -491,7 +491,6 @@ function NeedData({
 
 function Details({ crashes, prediction }: { crashes: number[]; prediction: ReadyPrediction }) {
   const charted = crashes.slice(-72);
-  const shown = crashes.slice(-48);
   const scale = Math.max(...charted.map((value) => Math.min(value, 12)), 2);
 
   return (
@@ -515,7 +514,7 @@ function Details({ crashes, prediction }: { crashes: number[]; prediction: Ready
           ))}
         </div>
         <RecentCrashLine values={charted} />
-        <RecentCrashDots values={shown} />
+        <RecentCrashDots values={crashes} />
       </article>
 
       <article className="panel">
@@ -597,9 +596,10 @@ export function RecentCrashLine({ values }: { values: number[] }) {
 
 export function RecentCrashDots({ values }: { values: number[] }) {
   const columns = crashColumns(values);
+  const shownCount = columns.reduce((sum, column) => sum + column.length, 0);
   return (
     <div className="dot-block">
-      <div className="dot-chart" role="list" aria-label={`Dot chart of the last ${values.length} crash values`}>
+      <div className="dot-chart" role="list" aria-label={`Dot chart of the last ${shownCount} crash values`}>
         {columns.map((column, columnIndex) => (
           <div key={columnIndex} className="dot-column" role="listitem">
             {column.map((value, index) => (
@@ -628,7 +628,8 @@ export function RecentCrashDots({ values }: { values: number[] }) {
   );
 }
 
-const DOT_COLUMN_ROWS = 6;
+const DOT_COLUMN_ROWS = 9;
+const DOT_COLUMN_COUNT = 35;
 
 function crashColumns(values: number[]): number[][] {
   const columns: number[][] = [];
@@ -641,7 +642,7 @@ function crashColumns(values: number[]): number[][] {
       columns.push([value]);
     }
   }
-  return columns;
+  return columns.slice(-DOT_COLUMN_COUNT);
 }
 
 function crashTone(value: number): "red" | "green" | "moon" {

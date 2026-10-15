@@ -45,7 +45,12 @@ describe("App", () => {
   it("stacks crash dots of the same range in one column", () => {
     const html = renderToStaticMarkup(createElement(RecentCrashDots, { values: [1.1, 1.4, 3.2, 8.1, 1.2] }));
     expect(html.match(/dot-column/g)).toHaveLength(3);
-    const streak = renderToStaticMarkup(createElement(RecentCrashDots, { values: [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7] }));
+    const streak = renderToStaticMarkup(
+      createElement(RecentCrashDots, { values: [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 1.15] }),
+    );
     expect(streak.match(/dot-column/g)).toHaveLength(2);
+    const wide = Array.from({ length: 40 }, (_, index) => (index % 2 === 0 ? 1.1 : 2.2));
+    const wideHtml = renderToStaticMarkup(createElement(RecentCrashDots, { values: wide }));
+    expect(wideHtml.match(/dot-column/g)).toHaveLength(35);
   });
 });
