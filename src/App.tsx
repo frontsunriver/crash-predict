@@ -490,8 +490,9 @@ function NeedData({
 }
 
 function Details({ crashes, prediction }: { crashes: number[]; prediction: ReadyPrediction }) {
+  const charted = crashes.slice(-72);
   const shown = crashes.slice(-48);
-  const scale = Math.max(...shown.map((value) => Math.min(value, 12)), 2);
+  const scale = Math.max(...charted.map((value) => Math.min(value, 12)), 2);
 
   return (
     <section className="details">
@@ -499,12 +500,12 @@ function Details({ crashes, prediction }: { crashes: number[]; prediction: Ready
         <header>
           <h2>Recent crashes</h2>
           <p>
-            Last {shown.length} points. Bars and the line use the same values, capped at 12x so early busts stay
-            visible. The dots use the BC.Game colors.
+            Last {charted.length} points on the bars and the line, capped at 12x so early busts stay visible. Dots in
+            one column share the same range, then the next range starts a new column.
           </p>
         </header>
         <div className="chart" role="img" aria-label="Recent crash points">
-          {shown.map((value, index) => (
+          {charted.map((value, index) => (
             <div key={`${value}-${index}`} className="bar-wrap" title={formatMultiplier(value)}>
               <div
                 className={`bar bar-${band(value)}`}
@@ -513,7 +514,7 @@ function Details({ crashes, prediction }: { crashes: number[]; prediction: Ready
             </div>
           ))}
         </div>
-        <RecentCrashLine values={shown} />
+        <RecentCrashLine values={charted} />
         <RecentCrashDots values={shown} />
       </article>
 
@@ -554,60 +555,59 @@ function Mark() {
 
 export function RecentCrashLine({ values }: { values: number[] }) {
   const cap = 12;
-  const width = 640;
-  const height = 168;
-  const padLeft = 46;
-  const padRight = 12;
-  const padTop = 16;
-  const padBottom = 12;
-  const plotWidth = width - padLeft - padRight;
-  const plotHeight = height - padTop - padBottom;
   const scale = Math.max(...values.map((value) => Math.min(value, cap)), 2);
-  const points = values.map((value, index) => {
-    const x = padLeft + (values.length === 1 ? plotWidth / 2 : (index / (values.length - 1)) * plotWidth);
-    const y = padTop + plotHeight - (Math.min(value, cap) / scale) * plotHeight;
-    return { x, y, value };
-  });
+  const yOf = (value: number) => 100 - (Math.min(value, cap) / scale) * 100;
+  const points = values.map((value, index) => ({
+    x: values.length === 1 ? 50 : (index / (values.length - 1)) * 100,
+    y: yOf(value),
+    value,
+  }));
   const ticks = [1, scale / 2, scale].filter(
     (tick, index, all) => tick >= 1 && all.findIndex((item) => Math.abs(item - tick) < 0.05) === index,
   );
 
   return (
-    <svg
-      className="line-chart"
-      viewBox={`0 0 ${width} ${height}`}
-      role="img"
-      aria-label={`Line chart of the last ${values.length} crash values`}
-    >
-      {ticks.map((tick) => {
-        const y = padTop + plotHeight - (Math.min(tick, cap) / scale) * plotHeight;
-        return (
-          <g key={tick}>
-            <line x1={padLeft} x2={width - padRight} y1={y} y2={y} />
-            <text x={padLeft - 8} y={y + 4} textAnchor="end">
-              {formatMultiplier(tick)}
-            </text>
-          </g>
-        );
-      })}
-      <polyline points={points.map((point) => `${point.x},${point.y}`).join(" ")} />
-      {points.map((point, index) => (
-        <circle key={`${point.value}-${index}`} cx={point.x} cy={point.y} r="3.2" className={`dot dot-${band(point.value)}`}>
-          <title>{formatMultiplier(point.value)}</title>
-        </circle>
+    <div className="line-chart" role="img" aria-label={`Line chart of the last ${values.length} crash values`}>
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none">
+        {ticks.map((tick) => {
+          const y = yOf(tick);
+          return <line key={tick} x1="0" x2="100" y1={y} y2={y} vectorEffect="non-scaling-stroke" />;
+        })}
+        <polyline
+          points={points.map((point) => `${point.x},${point.y}`).join(" ")}
+          vectorEffect="non-scaling-stroke"
+        />
+      </svg>
+      {ticks.map((tick) => (
+        <span key={tick} className="line-label" style={{ top: `${yOf(tick)}%` }}>
+          {formatMultiplier(tick)}
+        </span>
       ))}
-    </svg>
+      {points.map((point, index) => (
+        <span
+          key={`${point.value}-${index}`}
+          className={`line-dot dot-${band(point.value)}`}
+          style={{ left: `${point.x}%`, top: `${point.y}%` }}
+          title={formatMultiplier(point.value)}
+        />
+      ))}
+    </div>
   );
 }
 
 export function RecentCrashDots({ values }: { values: number[] }) {
+  const columns = crashColumns(values);
   return (
     <div className="dot-block">
       <div className="dot-chart" role="list" aria-label={`Dot chart of the last ${values.length} crash values`}>
-        {values.map((value, index) => (
-          <span key={`${value}-${index}`} className={`crash-dot crash-dot-${crashTone(value)}`} title={formatMultiplier(value)} role="listitem">
-            {dotLabel(value)}
-          </span>
+        {columns.map((column, columnIndex) => (
+          <div key={columnIndex} className="dot-column" role="listitem">
+            {column.map((value, index) => (
+              <span key={`${value}-${index}`} className={`crash-dot crash-dot-${crashTone(value)}`} title={formatMultiplier(value)}>
+                {dotLabel(value)}
+              </span>
+            ))}
+          </div>
         ))}
       </div>
       <p className="dot-key">
@@ -626,6 +626,22 @@ export function RecentCrashDots({ values }: { values: number[] }) {
       </p>
     </div>
   );
+}
+
+const DOT_COLUMN_ROWS = 6;
+
+function crashColumns(values: number[]): number[][] {
+  const columns: number[][] = [];
+  for (const value of values) {
+    const tone = crashTone(value);
+    const column = columns[columns.length - 1];
+    if (column && crashTone(column[0]) === tone && column.length < DOT_COLUMN_ROWS) {
+      column.push(value);
+    } else {
+      columns.push([value]);
+    }
+  }
+  return columns;
 }
 
 function crashTone(value: number): "red" | "green" | "moon" {

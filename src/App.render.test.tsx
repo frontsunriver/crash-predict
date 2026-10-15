@@ -41,4 +41,11 @@ describe("App", () => {
     expect(html).toContain("Under 2x");
     expect(html).toContain("10x and above");
   });
+
+  it("stacks crash dots of the same range in one column", () => {
+    const html = renderToStaticMarkup(createElement(RecentCrashDots, { values: [1.1, 1.4, 3.2, 8.1, 1.2] }));
+    expect(html.match(/dot-column/g)).toHaveLength(3);
+    const streak = renderToStaticMarkup(createElement(RecentCrashDots, { values: [1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7] }));
+    expect(streak.match(/dot-column/g)).toHaveLength(2);
+  });
 });
